@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ESP32 LED Control</title>
+
+  <style>
+    body {
+      text-align: center;
+      font-family: Arial;
+      background: #111;
+      color: white;
+      margin-top: 60px;
+    }
+
+    button {
+      width: 200px;
+      height: 60px;
+      font-size: 20px;
+      margin: 10px;
+      border-radius: 10px;
+      border: none;
+      cursor: pointer;
+    }
+
+    .on { background: green; color: white; }
+    .off { background: red; color: white; }
+  </style>
+</head>
+
+<body>
+
+  <h1>ESP32 LED Control</h1>
+
+  <button class="on" onclick="setLED(1)">ON</button><br>
+  <button class="off" onclick="setLED(0)">OFF</button>
+
+  <!-- ✅ THIS MUST EXIST -->
+  <div id="status">LED Status: Loading...</div>
+
+  <script type="module">
+
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+    import { getDatabase, ref, set, onValue }
+      from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
+    import { getAuth, signInAnonymously }
+      from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
+
+    // 🔥 REPLACE WITH YOUR CONFIG
+    const firebaseConfig = {
+	  apiKey: "AIzaSyA8rvg1tQDLUwmyBdm0toraWs-Hz0_jtAU",
+	  authDomain: "esp32-relay-2.firebaseapp.com",
+	  databaseURL: "https://esp32-relay-2-default-rtdb.asia-southeast1.firebasedatabase.app",
+	  projectId: "esp32-relay-2",
+	  storageBucket: "esp32-relay-2.firebasestorage.app",
+	  messagingSenderId: "371864991133",
+	  appId: "1:371864991133:web:d8f0d53336f21d43102b74"
+	};
+
+    const app = initializeApp(firebaseConfig);
+    const database = getDatabase(app);
+    const auth = getAuth(app);
+
+    // Anonymous login
+    signInAnonymously(auth);
+
+    const ledRef = ref(database, "/ledState");
+
+    // Button function
+    window.setLED = function(value) {
+      set(ledRef, value);
+    }
+
+    // Wait until DOM fully loads
+    document.addEventListener("DOMContentLoaded", () => {
+
+      const statusDiv = document.getElementById("status");
+
+      onValue(ledRef, (snapshot) => {
+        const value = snapshot.val();
+
+        if (value === 1) {
+          statusDiv.innerHTML = "LED Status: ON";
+          statusDiv.style.color = "green";
+        } else {
+          statusDiv.innerHTML = "LED Status: OFF";
+          statusDiv.style.color = "red";
+        }
+      });
+
+    });
+
+  </script>
+
+</body>
+</html>
