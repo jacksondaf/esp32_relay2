@@ -53,29 +53,35 @@
       appId:             "1:371864991133:web:d8f0d53336f21d43102b74"
     };
 
-    const app      = initializeApp(firebaseConfig);
-    const database = getDatabase(app);
-    const auth     = getAuth(app);
-    const ledRef   = ref(database, "/ledState");
-    const statusDiv = document.getElementById("status");
+    const app           = initializeApp(firebaseConfig);
+    const database      = getDatabase(app);
+    const auth          = getAuth(app);
+    const ledRef        = ref(database, "/ledState");
+    const motorStatusRef = ref(database, "/motorStatus");  // ← physical state
+    const statusDiv     = document.getElementById("status");
 
-    // ── Anonymous login then start listening ──
     signInAnonymously(auth).then(() => {
 
-      // ── Send boolean true/false ──
+      // ── Send command to ESP32 ──
       window.setMotor = function(value) {
         set(ledRef, value);
+        statusDiv.innerHTML   = value ? "Sending ON..." : "Sending OFF...";
+        statusDiv.style.color = "gray";
       }
 
-      // ── Listen for state changes ──
-      onValue(ledRef, (snapshot) => {
+      // ── Show PHYSICAL relay state from ESP32 ──
+      onValue(motorStatusRef, (snapshot) => {
         const value = snapshot.val();
         if (value === true) {
-          statusDiv.innerHTML   = "Motor Status: ON";
+          statusDiv.innerHTML   = "Motor Status: ON ✅";
           statusDiv.style.color = "green";
-        } else {
-          statusDiv.innerHTML   = "Motor Status: OFF";
+        } else if (value === false) {
+          statusDiv.innerHTML   = "Motor Status: OFF 🔴";
           statusDiv.style.color = "red";
+        } else {
+          // null = ESP32 never booted or offline
+          statusDiv.innerHTML   = "Motor Status: Unknown ⚠️";
+          statusDiv.style.color = "orange";
         }
       });
 
