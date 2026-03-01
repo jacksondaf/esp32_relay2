@@ -380,6 +380,33 @@
       line-height: 1.5;
     }
 
+    /* ── ESP32 offline banner ── */
+    .offline-banner {
+      display: none;
+      background: rgba(255,61,90,0.07);
+      border: 1px solid rgba(255,61,90,0.35);
+      border-radius: 10px;
+      padding: 14px 16px;
+      margin-bottom: 16px;
+    }
+
+    .offline-banner.visible { display: block; }
+
+    .offline-banner-title {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--red);
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      margin-bottom: 4px;
+    }
+
+    .offline-banner-body {
+      font-size: 13px;
+      color: var(--text-dim);
+      line-height: 1.5;
+    }
+
     /* ── Lockout banner ── */
     .lockout-banner {
       display: none;
@@ -534,6 +561,15 @@
     <div class="lockout-banner-body">
       Too many reboots detected. Motor commands are disabled.<br>
       Power cycle the ESP32 to clear lockout.
+    </div>
+  </div>
+
+  <!-- ESP32 offline banner -->
+  <div class="offline-banner" id="offlineBanner">
+    <div class="offline-banner-title">📡 ESP32 Offline</div>
+    <div class="offline-banner-body">
+      No heartbeat from ESP32 for 20 seconds.<br>
+      Motor has been <strong style="color:var(--red)">shut down</strong> on the device. Status shown may be stale.
     </div>
   </div>
 
@@ -909,6 +945,14 @@ function showLockoutBanner() {
   document.getElementById('lockoutBanner').classList.add('visible');
 }
 
+function showOfflineBanner() {
+  document.getElementById('offlineBanner').classList.add('visible');
+}
+
+function hideOfflineBanner() {
+  document.getElementById('offlineBanner').classList.remove('visible');
+}
+
 // Detect recovery state:
 // If motorStatus=false but ledState=true → ESP32 in recovery mode
 db.ref('/').on('value', snap => {
@@ -930,6 +974,73 @@ logsRef.limitToLast(10).on('child_added', snap => {
     showLockoutBanner();
   }
 });
+
+// ═════════════════════════════════════════
+// Heartbeat watchdog
+// ESP32 writes /heartbeat every 15s
+// If stale for 20s → ESP32 WiFi is down
+// UI overrides motor status to UNKNOWN
+// ═════════════════════════════════════════
+const HEARTBEAT_STALE_MS = 20000;
+let heartbeatWatchdog    = null;
+let esp32Offline         = false;
+
+db.ref('/heartbeat').on('value', snap => {
+  const val = snap.val();
+
+  // heartbeat=0 means ESP32 explicitly signalled going offline
+  if (val === 0) {
+    handleEsp32Offline();
+    return;
+  }
+
+  if (val === null) return; // no heartbeat node yet – ignore
+
+  // Valid heartbeat received
+  if (esp32Offline) {
+    esp32Offline = false;
+    hideOfflineBanner();
+    addLog('success', 'ESP32 back online');
+    // Re-read motorStatus to get fresh state
+    motorStatusRef.get().then(s => {
+      const status = s.val();
+      currentMotorStatus = status;
+      updateStatusUI(status);
+      updateButtons(status);
+    });
+  }
+
+  resetHeartbeatWatchdog();
+});
+
+function resetHeartbeatWatchdog() {
+  clearTimeout(heartbeatWatchdog);
+  heartbeatWatchdog = setTimeout(handleEsp32Offline, HEARTBEAT_STALE_MS);
+}
+
+function handleEsp32Offline() {
+  if (esp32Offline) return; // already handled
+  esp32Offline = true;
+  showOfflineBanner();
+  addLog('error', 'ESP32 heartbeat lost – WiFi may be down on device');
+
+  // If UI shows motor ON → override to UNKNOWN
+  // Motor is physically OFF (ESP32 shuts it down on WiFi loss)
+  if (currentMotorStatus === true) {
+    currentMotorStatus = null;
+    updateStatusUI(null);
+    addLog('warn', 'Motor status set to UNKNOWN – ESP32 unreachable');
+  }
+
+  // Cancel any pending send
+  if (isSending) {
+    clearTimeout(sendingTimeout);
+    isSending = false;
+    updateStatusUI(currentMotorStatus);
+    updateButtons(currentMotorStatus);
+    addLog('warn', 'Command cancelled – ESP32 offline');
+  }
+}
 
 // ═════════════════════════════════════════
 // Activity log
