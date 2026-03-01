@@ -106,6 +106,7 @@
     let sendingTimeout     = null;
     let esp32Offline       = false;
     let heartbeatWatchdog  = null;
+    let lockoutActive      = false;   // Fix 3: track lockout state
 
     const SEND_TIMEOUT_MS    = 8000;  // fallback if motorStatus doesn't update in 8s
     const HEARTBEAT_STALE_MS = 20000; // no heartbeat for 20s → ESP32 offline
@@ -128,15 +129,27 @@
       }
     }
 
+    // ── Enable/disable buttons safely ──
+    // Never re-enables if lockout is active
+    function enableButtons() {
+      if (lockoutActive) return; // Fix 3: lockout keeps buttons disabled
+      btnOn.disabled  = false;
+      btnOff.disabled = false;
+    }
+
+    function disableButtons() {
+      btnOn.disabled  = true;
+      btnOff.disabled = true;
+    }
+
     signInAnonymously(auth).then(() => {
 
       // ── Send command to ESP32 ──
       window.setMotor = function(value) {
-        if (isSending) return;
+        if (isSending || lockoutActive) return; // Fix 3: block if lockout
 
         isSending = true;
-        btnOn.disabled  = true;
-        btnOff.disabled = true;
+        disableButtons();
         statusDiv.innerHTML   = value ? "Sending ON..." : "Sending OFF...";
         statusDiv.style.color = "gray";
 
@@ -144,13 +157,11 @@
           statusDiv.innerHTML   = "Write Error: " + err.message;
           statusDiv.style.color = "orange";
           isSending = false;
-          btnOn.disabled  = false;
-          btnOff.disabled = false;
+          enableButtons();
         });
 
         // Fallback: if motorStatus doesn't update in 8s, re-read actual state.
-        // Covers: motor already ON/OFF (ESP32 re-syncs status),
-        //         recovery mode, lockout, slow network.
+        // Covers: motor already ON/OFF, recovery mode, lockout, slow network.
         clearTimeout(sendingTimeout);
         sendingTimeout = setTimeout(async () => {
           if (!isSending) return;
@@ -159,8 +170,7 @@
             currentMotorStatus = snap.val();
           } catch { /* keep last known */ }
           isSending = false;
-          btnOn.disabled  = false;
-          btnOff.disabled = false;
+          enableButtons();
           showMotorStatus(currentMotorStatus);
         }, SEND_TIMEOUT_MS);
       };
@@ -171,8 +181,7 @@
       onValue(motorStatusRef, (snapshot) => {
         clearTimeout(sendingTimeout); // real update arrived – cancel fallback
         isSending = false;
-        btnOn.disabled  = false;
-        btnOff.disabled = false;
+        enableButtons();
 
         const value = snapshot.val();
         currentMotorStatus = value;
@@ -196,10 +205,15 @@
       });
 
       // ── Lockout detection via Firebase logs ──
+      // Fix 3: also disable buttons permanently when lockout is active
       onValue(logsRef, (snapshot) => {
         snapshot.forEach(child => {
           if ((child.val() || "").includes("[LOCKOUT]")) {
+            lockoutActive = true;
             showBanner("lockoutBanner");
+            disableButtons(); // Fix 3: disable buttons on lockout
+            statusDiv.innerHTML   = "Motor Locked Out ⛔";
+            statusDiv.style.color = "red";
           }
         });
       });
@@ -257,8 +271,7 @@
       if (isSending) {
         clearTimeout(sendingTimeout);
         isSending = false;
-        btnOn.disabled  = false;
-        btnOff.disabled = false;
+        enableButtons();
         showMotorStatus(currentMotorStatus);
       }
     }
