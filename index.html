@@ -29,7 +29,7 @@
       font-weight: bold;
     }
 
-    /* Banners – only shown when needed, no impact on normal look */
+    /* Banners – hidden by default, shown only on events */
     .banner {
       display: none;
       margin: 16px auto 0;
@@ -51,18 +51,20 @@
 
   <div id="status">Status: Loading...</div>
 
-  <!-- Banners – hidden by default, shown only on events -->
+  <!-- ESP32 offline banner – shown when heartbeat goes stale for 20s -->
   <div class="banner" id="offlineBanner">
     📡 <b>ESP32 Offline</b> — Motor has been shut down on the device.<br>
     Status shown may be stale. Waiting for ESP32 to reconnect...
   </div>
 
+  <!-- Recovery banner – shown when ESP32 needs fresh OFF→ON after reboot -->
   <div class="banner" id="recoveryBanner">
     ⚡ <b>Fresh Command Required</b><br>
     ESP32 restarted while motor was ON.<br>
     Send <b>OFF</b> first, then <b>ON</b> to restart motor.
   </div>
 
+  <!-- Safe lockout banner – shown when ESP32 crashed too many times -->
   <div class="banner" id="lockoutBanner">
     ⚠️ <b>Safe Lockout Active</b><br>
     Too many reboots detected. Motor commands are disabled.<br>
@@ -105,7 +107,7 @@
     let esp32Offline       = false;
     let heartbeatWatchdog  = null;
 
-    const SEND_TIMEOUT_MS    = 8000;  // if motorStatus doesn't update → re-read
+    const SEND_TIMEOUT_MS    = 8000;  // fallback if motorStatus doesn't update in 8s
     const HEARTBEAT_STALE_MS = 20000; // no heartbeat for 20s → ESP32 offline
 
     function showBanner(id) { document.getElementById(id).style.display = "block"; }
@@ -146,9 +148,9 @@
           btnOff.disabled = false;
         });
 
-        // Fallback: if motorStatus doesn't update in 8s,
-        // re-read current actual state and show it.
-        // Covers: motor already ON/OFF, recovery mode, lockout, slow network.
+        // Fallback: if motorStatus doesn't update in 8s, re-read actual state.
+        // Covers: motor already ON/OFF (ESP32 re-syncs status),
+        //         recovery mode, lockout, slow network.
         clearTimeout(sendingTimeout);
         sendingTimeout = setTimeout(async () => {
           if (!isSending) return;
@@ -164,10 +166,10 @@
       };
 
       // ── Show PHYSICAL relay state from ESP32 ──
-      // ESP32 now writes motorStatus even when motor was already ON/OFF
-      // so this fires on every command and exits "Sending..." correctly.
+      // ESP32 re-syncs motorStatus even when motor was already ON/OFF,
+      // so this fires on every command and clears "Sending..." correctly.
       onValue(motorStatusRef, (snapshot) => {
-        clearTimeout(sendingTimeout); // real update arrived — cancel fallback
+        clearTimeout(sendingTimeout); // real update arrived – cancel fallback
         isSending = false;
         btnOn.disabled  = false;
         btnOff.disabled = false;
@@ -176,13 +178,13 @@
         currentMotorStatus = value;
         showMotorStatus(value);
 
-        // Hide recovery banner once motor actually turns OFF
+        // Hide recovery banner once motor turns OFF (fresh OFF received)
         if (value === false) hideBanner("recoveryBanner");
       });
 
       // ── Recovery detection ──
-      // ledState=true but motorStatus=false means ESP32 booted
-      // with Firebase=true and is holding motor OFF until fresh command.
+      // ledState=true but motorStatus=false means ESP32 booted with Firebase=true
+      // and is holding motor OFF until user sends a fresh OFF→ON sequence.
       onValue(ref(database, "/"), (snapshot) => {
         const data = snapshot.val();
         if (!data) return;
@@ -203,21 +205,21 @@
       });
 
       // ── Heartbeat watchdog ──
-      // ESP32 writes /heartbeat (uptime seconds) every 15s.
-      // If silent for 20s → ESP32 WiFi dropped → motor is physically OFF
-      // → override UI to Unknown so user isn't shown stale ON status.
+      // ESP32 writes /heartbeat (uptime seconds) every 15s while alive.
+      // If silent for 20s → ESP32 WiFi dropped → motor is physically OFF.
+      // Override UI to Unknown so user isn't shown a stale ON status.
       onValue(heartbeatRef, (snapshot) => {
         const val = snapshot.val();
 
+        // heartbeat=0 → ESP32 explicitly signalled WiFi going down
         if (val === 0) {
-          // ESP32 explicitly signalled it's going offline before WiFi dropped
           handleEsp32Offline();
           return;
         }
 
-        if (val === null) return; // node doesn't exist yet
+        if (val === null) return; // node doesn't exist yet – ignore
 
-        // Valid heartbeat — ESP32 alive
+        // Valid heartbeat – ESP32 is alive
         if (esp32Offline) {
           esp32Offline = false;
           hideBanner("offlineBanner");
@@ -238,8 +240,9 @@
       statusDiv.style.color = "orange";
     });
 
+    // ── ESP32 offline handler ──
     function handleEsp32Offline() {
-      if (esp32Offline) return;
+      if (esp32Offline) return; // already handled
       esp32Offline = true;
       showBanner("offlineBanner");
 
@@ -259,6 +262,7 @@
         showMotorStatus(currentMotorStatus);
       }
     }
+
   </script>
 </body>
 </html>
