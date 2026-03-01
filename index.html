@@ -22,23 +22,57 @@
     }
     .on  { background: green; color: white; }
     .off { background: red;   color: white; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
     #status {
       margin-top: 20px;
       font-size: 22px;
       font-weight: bold;
     }
+
+    /* Banners – only shown when needed, no impact on normal look */
+    .banner {
+      display: none;
+      margin: 16px auto 0;
+      max-width: 380px;
+      padding: 10px 14px;
+      border-radius: 8px;
+      font-size: 14px;
+    }
+    #offlineBanner  { background: #7f0000; color: #ffaaaa; }
+    #recoveryBanner { background: #7f5000; color: #ffe0aa; }
+    #lockoutBanner  { background: #5a0030; color: #ffaad4; }
   </style>
 </head>
 <body>
   <h1>Motor Control</h1>
-  <button class="on"  onclick="setMotor(true)">ON</button><br>
-  <button class="off" onclick="setMotor(false)">OFF</button>
+
+  <button class="on"  id="btnOn"  onclick="setMotor(true)">ON</button><br>
+  <button class="off" id="btnOff" onclick="setMotor(false)">OFF</button>
+
   <div id="status">Status: Loading...</div>
+
+  <!-- Banners – hidden by default, shown only on events -->
+  <div class="banner" id="offlineBanner">
+    📡 <b>ESP32 Offline</b> — Motor has been shut down on the device.<br>
+    Status shown may be stale. Waiting for ESP32 to reconnect...
+  </div>
+
+  <div class="banner" id="recoveryBanner">
+    ⚡ <b>Fresh Command Required</b><br>
+    ESP32 restarted while motor was ON.<br>
+    Send <b>OFF</b> first, then <b>ON</b> to restart motor.
+  </div>
+
+  <div class="banner" id="lockoutBanner">
+    ⚠️ <b>Safe Lockout Active</b><br>
+    Too many reboots detected. Motor commands are disabled.<br>
+    Power cycle the ESP32 to clear lockout.
+  </div>
 
   <script type="module">
     import { initializeApp }
       from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
-    import { getDatabase, ref, set, onValue }
+    import { getDatabase, ref, set, get, onValue }
       from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
     import { getAuth, signInAnonymously }
       from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
@@ -53,36 +87,150 @@
       appId:             "1:371864991133:web:d8f0d53336f21d43102b74"
     };
 
-    const app           = initializeApp(firebaseConfig);
-    const database      = getDatabase(app);
-    const auth          = getAuth(app);
-    const ledRef        = ref(database, "/ledState");
-    const motorStatusRef = ref(database, "/motorStatus");  // ← physical state
-    const statusDiv     = document.getElementById("status");
+    const app            = initializeApp(firebaseConfig);
+    const database       = getDatabase(app);
+    const auth           = getAuth(app);
+    const ledRef         = ref(database, "/ledState");
+    const motorStatusRef = ref(database, "/motorStatus");
+    const heartbeatRef   = ref(database, "/heartbeat");
+    const logsRef        = ref(database, "/logs");
+    const statusDiv      = document.getElementById("status");
+    const btnOn          = document.getElementById("btnOn");
+    const btnOff         = document.getElementById("btnOff");
+
+    // ── Internal state ──
+    let currentMotorStatus = null;
+    let isSending          = false;
+    let sendingTimeout     = null;
+    let esp32Offline       = false;
+    let heartbeatWatchdog  = null;
+
+    const SEND_TIMEOUT_MS    = 8000;  // if motorStatus doesn't update → re-read
+    const HEARTBEAT_STALE_MS = 20000; // no heartbeat for 20s → ESP32 offline
+
+    function showBanner(id) { document.getElementById(id).style.display = "block"; }
+    function hideBanner(id) { document.getElementById(id).style.display = "none";  }
+
+    // ── Show motor status (original style) ──
+    function showMotorStatus(value) {
+      if (isSending) return; // don't override "Sending..." text
+      if (value === true) {
+        statusDiv.innerHTML   = "Motor Status: ON ✅";
+        statusDiv.style.color = "green";
+      } else if (value === false) {
+        statusDiv.innerHTML   = "Motor Status: OFF 🔴";
+        statusDiv.style.color = "red";
+      } else {
+        statusDiv.innerHTML   = "Motor Status: Unknown ⚠️";
+        statusDiv.style.color = "orange";
+      }
+    }
 
     signInAnonymously(auth).then(() => {
 
       // ── Send command to ESP32 ──
       window.setMotor = function(value) {
-        set(ledRef, value);
+        if (isSending) return;
+
+        isSending = true;
+        btnOn.disabled  = true;
+        btnOff.disabled = true;
         statusDiv.innerHTML   = value ? "Sending ON..." : "Sending OFF...";
         statusDiv.style.color = "gray";
-      }
+
+        set(ledRef, value).catch((err) => {
+          statusDiv.innerHTML   = "Write Error: " + err.message;
+          statusDiv.style.color = "orange";
+          isSending = false;
+          btnOn.disabled  = false;
+          btnOff.disabled = false;
+        });
+
+        // Fallback: if motorStatus doesn't update in 8s,
+        // re-read current actual state and show it.
+        // Covers: motor already ON/OFF, recovery mode, lockout, slow network.
+        clearTimeout(sendingTimeout);
+        sendingTimeout = setTimeout(async () => {
+          if (!isSending) return;
+          try {
+            const snap = await get(motorStatusRef);
+            currentMotorStatus = snap.val();
+          } catch { /* keep last known */ }
+          isSending = false;
+          btnOn.disabled  = false;
+          btnOff.disabled = false;
+          showMotorStatus(currentMotorStatus);
+        }, SEND_TIMEOUT_MS);
+      };
 
       // ── Show PHYSICAL relay state from ESP32 ──
+      // ESP32 now writes motorStatus even when motor was already ON/OFF
+      // so this fires on every command and exits "Sending..." correctly.
       onValue(motorStatusRef, (snapshot) => {
+        clearTimeout(sendingTimeout); // real update arrived — cancel fallback
+        isSending = false;
+        btnOn.disabled  = false;
+        btnOff.disabled = false;
+
         const value = snapshot.val();
-        if (value === true) {
-          statusDiv.innerHTML   = "Motor Status: ON ✅";
-          statusDiv.style.color = "green";
-        } else if (value === false) {
-          statusDiv.innerHTML   = "Motor Status: OFF 🔴";
-          statusDiv.style.color = "red";
+        currentMotorStatus = value;
+        showMotorStatus(value);
+
+        // Hide recovery banner once motor actually turns OFF
+        if (value === false) hideBanner("recoveryBanner");
+      });
+
+      // ── Recovery detection ──
+      // ledState=true but motorStatus=false means ESP32 booted
+      // with Firebase=true and is holding motor OFF until fresh command.
+      onValue(ref(database, "/"), (snapshot) => {
+        const data = snapshot.val();
+        if (!data) return;
+        if (data.ledState === true && data.motorStatus === false) {
+          showBanner("recoveryBanner");
         } else {
-          // null = ESP32 never booted or offline
-          statusDiv.innerHTML   = "Motor Status: Unknown ⚠️";
-          statusDiv.style.color = "orange";
+          hideBanner("recoveryBanner");
         }
+      });
+
+      // ── Lockout detection via Firebase logs ──
+      onValue(logsRef, (snapshot) => {
+        snapshot.forEach(child => {
+          if ((child.val() || "").includes("[LOCKOUT]")) {
+            showBanner("lockoutBanner");
+          }
+        });
+      });
+
+      // ── Heartbeat watchdog ──
+      // ESP32 writes /heartbeat (uptime seconds) every 15s.
+      // If silent for 20s → ESP32 WiFi dropped → motor is physically OFF
+      // → override UI to Unknown so user isn't shown stale ON status.
+      onValue(heartbeatRef, (snapshot) => {
+        const val = snapshot.val();
+
+        if (val === 0) {
+          // ESP32 explicitly signalled it's going offline before WiFi dropped
+          handleEsp32Offline();
+          return;
+        }
+
+        if (val === null) return; // node doesn't exist yet
+
+        // Valid heartbeat — ESP32 alive
+        if (esp32Offline) {
+          esp32Offline = false;
+          hideBanner("offlineBanner");
+          // Re-read fresh motorStatus
+          get(motorStatusRef).then(snap => {
+            currentMotorStatus = snap.val();
+            showMotorStatus(currentMotorStatus);
+          });
+        }
+
+        // Reset 20s stale timer
+        clearTimeout(heartbeatWatchdog);
+        heartbeatWatchdog = setTimeout(handleEsp32Offline, HEARTBEAT_STALE_MS);
       });
 
     }).catch((error) => {
@@ -90,6 +238,27 @@
       statusDiv.style.color = "orange";
     });
 
+    function handleEsp32Offline() {
+      if (esp32Offline) return;
+      esp32Offline = true;
+      showBanner("offlineBanner");
+
+      // Motor is physically OFF (ESP32 calls relayOff on WiFi loss).
+      // If UI still shows ON, override to Unknown.
+      if (currentMotorStatus === true) {
+        currentMotorStatus = null;
+        showMotorStatus(null);
+      }
+
+      // Cancel any in-flight send
+      if (isSending) {
+        clearTimeout(sendingTimeout);
+        isSending = false;
+        btnOn.disabled  = false;
+        btnOff.disabled = false;
+        showMotorStatus(currentMotorStatus);
+      }
+    }
   </script>
 </body>
 </html>
